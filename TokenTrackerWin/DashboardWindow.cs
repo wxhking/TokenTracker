@@ -53,6 +53,7 @@ internal sealed class DashboardWindow : Window
     private bool _exiting;
     private bool _oauthInFlight;
     private CancellationTokenSource? _oauthTimeout;
+    private readonly OAuthLoginWindow _oauthLoginWindow = new();
     private Task? _initializationTask;
     private bool _recoveryInFlight;
     private bool _tiltForwardLogged;
@@ -511,7 +512,9 @@ internal sealed class DashboardWindow : Window
                     {
                         Log($"oauth open urlPresent={!string.IsNullOrEmpty(url)} urlLen={url.Length}");
                         BeginNativeOAuth();
-                        OpenInBrowser(url);
+                        // Dedicated browser window so it can be closed by ownership
+                        // (WM_CLOSE) after the deep link, instead of sweeping tabs.
+                        _oauthLoginWindow.Launch(url);
                     }
                     else if (t.GetString() == "authCompleted")
                     {
@@ -1001,6 +1004,7 @@ internal sealed class DashboardWindow : Window
 
     private void ExpireNativeOAuth()
     {
+        _oauthLoginWindow.CloseTracked("oauth flow timed out");
         CompleteNativeOAuth();
     }
 
@@ -1049,7 +1053,7 @@ internal sealed class DashboardWindow : Window
     {
         Log($"HandleAuthCallback code.len={code.Length}");
         ShowDashboard();
-        BrowserTabCloser.CloseAuthCallbackTab(_server.BaseUrl, _hwnd);
+        _oauthLoginWindow.CloseTracked("auth callback received");
         var encoded = Uri.EscapeDataString(code);
         NavigateWhenServerReady($"/auth/callback?insforge_code={encoded}&app=1");
 

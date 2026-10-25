@@ -35,6 +35,7 @@
     <Compile Include="../TokenTrackerWin/CloudUsageExport.cs" Link="CloudUsageExport.cs" />
     <Compile Include="../TokenTrackerWin/DocumentScriptCache.cs" Link="DocumentScriptCache.cs" />
     <Compile Include="../TokenTrackerWin/WebViewActivity.cs" Link="WebViewActivity.cs" />
+    <Compile Include="../TokenTrackerWin/OAuthLoginWindow.cs" Link="OAuthLoginWindow.cs" />
   </ItemGroup>
 
 </Project>
