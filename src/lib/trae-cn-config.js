@@ -2,7 +2,8 @@
 
 /**
  * TRAE Work CN (国内版) config + usage fetch. Phase A: macOS + Windows + test-injected
- * paths only. Resolves the CN home, reads the `iCubeAuthInfo://icube.cloudide`
+ * paths only. Resolves the CN app data directory (TRAE Work CN or the classic
+ * Trae CN client), reads the `iCubeAuthInfo://icube.cloudide`
  * blob from User/globalStorage/storage.json (plaintext JSON or Base64 tc v5),
  * and talks to the TRAE CN usage API. JWTs / refresh tokens are never
  * persisted, never logged, and never put into error messages; a
@@ -31,7 +32,7 @@ function isTraeCnUsageEnabled(env = process.env) {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return normalized === "1" || normalized === "true";
 }
-const TRAE_CN_APP_DIR = "TRAE SOLO CN";
+const TRAE_CN_APP_DIRS = ["TRAE SOLO CN", "Trae CN"];
 const TRAE_CN_AUTH_KEY = "iCubeAuthInfo://icube.cloudide";
 
 const TRAE_CN_USAGE_URL = "https://api.trae.cn/trae/api/v1/pay/query_user_usage_group_by_session";
@@ -77,30 +78,42 @@ const TRAE_CN_KG = Buffer.from([
 // Path resolution
 // ---------------------------------------------------------------------------
 
-function resolveTraeCnHome({ env = process.env, home = os.homedir(), platform = process.platform } = {}) {
-  const override = env[TRAE_CN_HOME_ENV];
-  if (typeof override === "string" && override.trim()) {
-    return path.resolve(override.trim());
-  }
+function traeCnDataParent({ env = process.env, home = os.homedir(), platform = process.platform } = {}) {
   if (platform === "darwin") {
-    return path.join(home, "Library", "Application Support", TRAE_CN_APP_DIR);
+    return path.join(home, "Library", "Application Support");
   }
   if (platform === "win32") {
-    // Windows keeps the CN Work app under the roaming profile, mirroring the
-    // macOS Application Support layout (APPDATA/TRAE SOLO CN/User/...).
-    const appData =
-      typeof env.APPDATA === "string" && env.APPDATA.trim()
-        ? env.APPDATA.trim()
-        : path.join(home, "AppData", "Roaming");
-    return path.join(appData, TRAE_CN_APP_DIR);
+    // Windows keeps the CN app under the roaming profile, mirroring the
+    // macOS Application Support layout (<parent>/<app dir>/User/...).
+    return typeof env.APPDATA === "string" && env.APPDATA.trim()
+      ? env.APPDATA.trim()
+      : path.join(home, "AppData", "Roaming");
   }
-  // No verified CN Work app-data layout on other platforms yet.
+  // No verified CN app-data layout on other platforms yet.
   return null;
 }
 
 function resolveTraeCnStoragePath(options = {}) {
-  const home = resolveTraeCnHome(options);
-  return home ? path.join(home, "User", "globalStorage", "storage.json") : null;
+  const env = options.env ?? process.env;
+  const override = env[TRAE_CN_HOME_ENV];
+  if (typeof override === "string" && override.trim()) {
+    return path.join(path.resolve(override.trim()), "User", "globalStorage", "storage.json");
+  }
+  const parent = traeCnDataParent({ env, home: options.home ?? os.homedir(), platform: options.platform ?? process.platform });
+  if (!parent) return null;
+  for (const dir of TRAE_CN_APP_DIRS) {
+    const candidate = path.join(parent, dir, "User", "globalStorage", "storage.json");
+    let present;
+    try { present = fs.statSync(candidate).isFile(); }
+    catch (err) {
+      // Permission failures must reach the reader's diagnostics, not
+      // masquerade as an absent installation and silently drop an entire
+      // usage history (same discovery policy as trae-db.js).
+      present = err.code !== "ENOENT" && err.code !== "ENOTDIR";
+    }
+    if (present) return candidate;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +537,7 @@ module.exports = {
   TRAE_CN_HOME_ENV,
   TRAE_CN_USAGE_ENV,
   isTraeCnUsageEnabled,
-  TRAE_CN_APP_DIR,
+  TRAE_CN_APP_DIRS,
   TRAE_CN_AUTH_KEY,
   TRAE_CN_USAGE_URL,
   TRAE_CN_USAGE_TYPE,
@@ -532,7 +545,6 @@ module.exports = {
   TRAE_CN_USAGE_MAX_PAGES,
   TRAE_CN_USAGE_DELAY_MS,
   TRAE_CN_MAGIC,
-  resolveTraeCnHome,
   resolveTraeCnStoragePath,
   traeCnHardcodedKdfSecret,
   deriveTraeCnKeyIv,

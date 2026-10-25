@@ -21,7 +21,6 @@ const {
   TRAE_CN_AUTH_KEY,
   TRAE_CN_USAGE_URL,
   TRAE_CN_USAGE_DELAY_MS,
-  resolveTraeCnHome,
   resolveTraeCnStoragePath,
   decryptTraeCnBase64,
   parseTraeCnAuthValue,
@@ -32,8 +31,6 @@ const {
   fetchTraeCnUsageWindowed,
   fetchTraeCnUsageWithAuth,
 } = require("../src/lib/trae-cn-config");
-
-const CN_APP_DIR = "TRAE SOLO CN";
 
 // Frozen fixture: encrypted with the documented KDF, fixed 32-byte salt.
 const FIXTURE_B64 =
@@ -108,46 +105,62 @@ function jsonResponse(status, body) {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-test("resolveTraeCnHome honors TOKENTRACKER_TRAE_CN_HOME override", () => {
-  assert.equal(
-    resolveTraeCnHome({ env: { [TRAE_CN_HOME_ENV]: "/custom/cn-home" } }),
-    path.resolve("/custom/cn-home"),
-  );
-  // Whitespace-only override falls back to the platform default.
-  const fallback = resolveTraeCnHome({ env: { [TRAE_CN_HOME_ENV]: "   " }, platform: "darwin", home: "/Users/t" });
-  assert.equal(fallback, path.join("/Users/t", "Library", "Application Support", CN_APP_DIR));
-});
-
-test("resolveTraeCnHome resolves the macOS and Windows defaults", () => {
-  const darwinHome = "/Users/tester";
-  assert.equal(
-    resolveTraeCnHome({ platform: "darwin", home: darwinHome }),
-    path.join(darwinHome, "Library", "Application Support", CN_APP_DIR),
-  );
-  // Windows keeps the CN Work app under APPDATA (or the roaming profile).
-  const winHome = "C:\\Users\\tester";
-  const appData = "C:\\Users\\tester\\AppData\\Roaming";
-  assert.equal(
-    resolveTraeCnHome({ platform: "win32", home: winHome, env: { APPDATA: appData } }),
-    path.join(appData, CN_APP_DIR),
-  );
-  // No verified CN Work app-data layout on other platforms yet.
-  assert.equal(resolveTraeCnHome({ platform: "linux", home: darwinHome, env: {} }), null);
-});
-
-test("resolveTraeCnStoragePath points at User/globalStorage/storage.json", () => {
+test("resolveTraeCnStoragePath honors TOKENTRACKER_TRAE_CN_HOME override", () => {
   const override = "/tmp/cn-install";
   assert.equal(
     resolveTraeCnStoragePath({ env: { [TRAE_CN_HOME_ENV]: override } }),
     path.join(path.resolve(override), "User", "globalStorage", "storage.json"),
   );
+});
+
+test("resolveTraeCnStoragePath discovers the classic Trae CN client without an override", () => {
+  const winParent = makeTraeCnHome();
+  writeStorage(path.join(winParent, "Trae CN"));
   assert.equal(
-    resolveTraeCnStoragePath({ platform: "darwin", home: "/Users/tester", env: {} }),
-    path.join("/Users/tester", "Library", "Application Support", CN_APP_DIR, "User", "globalStorage", "storage.json"),
+    resolveTraeCnStoragePath({ platform: "win32", home: "C:\\u", env: { APPDATA: winParent } }),
+    path.join(winParent, "Trae CN", "User", "globalStorage", "storage.json"),
   );
+  const home = makeTraeCnHome();
+  writeStorage(path.join(home, "Library", "Application Support", "Trae CN"));
   assert.equal(
-    resolveTraeCnStoragePath({ platform: "win32", home: "C:\\Users\\tester", env: { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" } }),
-    path.join("C:\\Users\\tester\\AppData\\Roaming", CN_APP_DIR, "User", "globalStorage", "storage.json"),
+    resolveTraeCnStoragePath({ platform: "darwin", home, env: {} }),
+    path.join(home, "Library", "Application Support", "Trae CN", "User", "globalStorage", "storage.json"),
+  );
+});
+
+test("resolveTraeCnStoragePath prefers TRAE SOLO CN when both clients are installed", () => {
+  const parent = makeTraeCnHome();
+  writeStorage(path.join(parent, "Trae CN"));
+  writeStorage(path.join(parent, "TRAE SOLO CN"));
+  assert.equal(
+    resolveTraeCnStoragePath({ platform: "win32", home: "C:\\u", env: { APPDATA: parent } }),
+    path.join(parent, "TRAE SOLO CN", "User", "globalStorage", "storage.json"),
+  );
+});
+
+test("resolveTraeCnStoragePath returns null when no CN client is installed", () => {
+  const parent = makeTraeCnHome();
+  assert.equal(resolveTraeCnStoragePath({ platform: "win32", home: "C:\\u", env: { APPDATA: parent } }), null);
+  assert.equal(resolveTraeCnStoragePath({ platform: "darwin", home: parent, env: {} }), null);
+  // A whitespace-only override falls back to discovery, which finds nothing.
+  assert.equal(
+    resolveTraeCnStoragePath({ env: { [TRAE_CN_HOME_ENV]: "   " }, platform: "darwin", home: parent }),
+    null,
+  );
+  // No verified CN app-data layout on other platforms yet.
+  assert.equal(resolveTraeCnStoragePath({ platform: "linux", home: parent, env: {} }), null);
+});
+
+test("resolveTraeCnStoragePath finds the classic client through a junction", { skip: process.platform !== "win32" }, () => {
+  const parent = makeTraeCnHome();
+  const realHome = makeTraeCnHome();
+  writeStorage(realHome);
+  // mklink /D relocation is the community-standard way to move Trae CN off
+  // C:; statSync follows the junction, so discovery needs no special casing.
+  fs.symlinkSync(realHome, path.join(parent, "Trae CN"), "junction");
+  assert.equal(
+    resolveTraeCnStoragePath({ platform: "win32", home: "C:\\u", env: { APPDATA: parent } }),
+    path.join(parent, "Trae CN", "User", "globalStorage", "storage.json"),
   );
 });
 
