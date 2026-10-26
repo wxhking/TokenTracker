@@ -46,6 +46,8 @@ internal sealed class OAuthLoginWindow
 
     private readonly object _gate = new();
     private nint _trackedWindow;
+    private uint _trackedProcessId;
+    private string _trackedWindowClass = "";
     private bool _closeWhenFound;
     private int _generation;
 
@@ -58,6 +60,19 @@ internal sealed class OAuthLoginWindow
     {
         CloseTracked("superseded by a new sign-in", logCategory);
 
+        // Retire any still-pending discovery from the previous flow BEFORE
+        // resolving the browser or falling back to the shell. Without this
+        // bump, a launch that ends in the shell fallback leaves the earlier
+        // discovery task live — with a close possibly queued by the
+        // CloseTracked above — and it would go on to identify and close
+        // whatever window the fallback opens instead.
+        int generation;
+        lock (_gate)
+        {
+            generation = ++_generation;
+            _closeWhenFound = false;
+        }
+
         var command = ReadOpenCommand();
         var launch = command is null ? null : ResolveDefaultBrowserLaunch(url, command);
         if (launch is null)
@@ -65,13 +80,6 @@ internal sealed class OAuthLoginWindow
             Diag.Log(logCategory, "default browser executable not resolved; opening via shell, window cleanup disabled");
             OpenViaShell(url);
             return;
-        }
-
-        // Fresh flow: a close queued by an aborted earlier attempt must not hit
-        // the window we are about to open.
-        lock (_gate)
-        {
-            _closeWhenFound = false;
         }
 
         var knownWindows = SnapshotBrowserWindows(launch.Value.ProcessName);
@@ -89,11 +97,6 @@ internal sealed class OAuthLoginWindow
             return;
         }
 
-        int generation;
-        lock (_gate)
-        {
-            generation = ++_generation;
-        }
         Diag.Log(logCategory, $"oauth login window launched process={launch.Value.ProcessName}");
         _ = Task.Run(() => TrackNewWindow(knownWindows, launch.Value.ProcessName, generation, logCategory));
     }
@@ -106,12 +109,16 @@ internal sealed class OAuthLoginWindow
     public void CloseTracked(string reason, string logCategory = "browser")
     {
         nint hwnd;
+        uint processId;
+        string windowClass;
         lock (_gate)
         {
             if (_trackedWindow != 0)
             {
-                hwnd = _trackedWindow;
+                (hwnd, processId, windowClass) = (_trackedWindow, _trackedProcessId, _trackedWindowClass);
                 _trackedWindow = 0;
+                _trackedProcessId = 0;
+                _trackedWindowClass = "";
                 _closeWhenFound = false;
             }
             else
@@ -122,15 +129,7 @@ internal sealed class OAuthLoginWindow
             }
         }
 
-        if (IsWindow(hwnd))
-        {
-            PostMessage(hwnd, WM_CLOSE, 0, 0);
-            Diag.Log(logCategory, $"closed OAuth login window ({reason})");
-        }
-        else
-        {
-            Diag.Log(logCategory, $"OAuth login window already gone ({reason})");
-        }
+        PostCloseIfIdentityHolds(hwnd, processId, windowClass, reason, logCategory);
     }
 
     private void TrackNewWindow(HashSet<nint> knownWindows, string processName, int generation, string logCategory)
@@ -146,19 +145,24 @@ internal sealed class OAuthLoginWindow
             var hwnd = FindNewBrowserWindow(knownWindows, processName);
             if (hwnd == 0) continue;
 
+            GetWindowThreadProcessId(hwnd, out var processId);
+            var windowClass = GetWindowClassName(hwnd);
+
             bool closeNow;
             lock (_gate)
             {
                 if (_generation != generation) return;
                 _trackedWindow = hwnd;
+                _trackedProcessId = processId;
+                _trackedWindowClass = windowClass;
                 closeNow = _closeWhenFound;
                 _closeWhenFound = false;
             }
 
             if (closeNow)
             {
-                PostMessage(hwnd, WM_CLOSE, 0, 0);
-                Diag.Log(logCategory, "closed OAuth login window (auth callback arrived before the window was identified)");
+                PostCloseIfIdentityHolds(hwnd, processId, windowClass,
+                    "auth callback arrived before the window was identified", logCategory);
             }
             else
             {
@@ -170,14 +174,43 @@ internal sealed class OAuthLoginWindow
         Diag.Log(logCategory, "OAuth login window not identified; cleanup skipped");
     }
 
+    /// <summary>HWNDs are recycled once a window is destroyed; only post the
+    /// close when the window still belongs to the process and window class
+    /// captured at identification time, so an unrelated window that happened
+    /// to reuse the HWND is never closed.</summary>
+    private void PostCloseIfIdentityHolds(nint hwnd, uint processId, string windowClass, string reason, string logCategory)
+    {
+        if (IsWindow(hwnd)
+            && GetWindowThreadProcessId(hwnd, out var currentPid) != 0
+            && currentPid == processId
+            && GetWindowClassName(hwnd) == windowClass)
+        {
+            PostMessage(hwnd, WM_CLOSE, 0, 0);
+            Diag.Log(logCategory, $"closed OAuth login window ({reason})");
+        }
+        else
+        {
+            Diag.Log(logCategory, $"OAuth login window gone or reused; close skipped ({reason})");
+        }
+    }
+
+    // Only browsers known to accept `--new-window` are launched directly.
+    // Other registered handlers keep their own argument conventions (Firefox
+    // registers `-osint -url`, arbitrary apps anything at all), so a direct
+    // launch could appear to succeed while opening nothing — those handlers
+    // get the plain shell open instead, with cleanup disabled.
+    private static readonly HashSet<string> KnownBrowserProcessNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "chrome", "msedge", "brave", "firefox", "opera", "vivaldi",
+    };
+
     internal static LaunchSpec? ResolveDefaultBrowserLaunch(string url, string openCommand)
     {
         var exePath = ExtractExecutablePath(openCommand);
         if (exePath is null || !File.Exists(exePath)) return null;
-        return new LaunchSpec(
-            Path.GetFileNameWithoutExtension(exePath),
-            exePath,
-            $"--new-window \"{url}\"");
+        var processName = Path.GetFileNameWithoutExtension(exePath);
+        if (!KnownBrowserProcessNames.Contains(processName)) return null;
+        return new LaunchSpec(processName, exePath, $"--new-window \"{url}\"");
     }
 
     /// <summary>Pulls the executable out of a ProgId <c>shell\open\command</c>
